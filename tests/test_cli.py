@@ -73,6 +73,14 @@ else:
             self.assertEqual([item["event"] for item in records], ["start", "output", "result"])
             self.assertEqual(records[0]["argv"], ["--version"])
 
+    def test_bare_invocation_prints_help_like_real_gh(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "commands.jsonl"
+            completed = self.run_cli(Path("az"), log)
+            self.assertEqual(completed.returncode, 0)
+            self.assertIn(b"usage: gh", completed.stdout.lower())
+            self.assertIn(b"pr", completed.stdout)
+
     def test_pr_list_maps_gh_fields_and_azure_flags(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

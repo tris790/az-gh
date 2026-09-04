@@ -66,7 +66,9 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
         return exc.exit_code
 
     if options.command is None:
-        raise CliError("gh: no command specified; try gh --help")
+        # Real gh treats a bare invocation as a help request and exits 0.
+        emit("stdout", root.format_help().encode("utf-8"))
+        return 0
     az = AzCli(emit)
     if options.command == "auth" and options.auth_command == "status":
         data = account(az)
