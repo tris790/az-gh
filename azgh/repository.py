@@ -45,7 +45,12 @@ class RepoContext:
 
 def parse_repo_flag(value: str) -> tuple[str | None, str | None, str | None]:
     if value.startswith("http://") or value.startswith("https://"):
-        return parse_remote(value)
+        parsed = parse_remote(value)
+        if parsed == (None, None, None):
+            raise CliError(
+                "az-gh: --repo must be an Azure DevOps organization, project, or repository URL"
+            )
+        return parsed
     parts = [unquote(part) for part in value.strip("/").split("/") if part]
     if len(parts) == 3:
         return parts[0], parts[1], parts[2]
@@ -64,15 +69,38 @@ def parse_remote(remote: str) -> tuple[str | None, str | None, str | None]:
     parsed = urlparse(remote)
     host = parsed.hostname or ""
     path = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
-    if host == "dev.azure.com" and "_git" in path:
-        marker = path.index("_git")
-        if marker >= 2 and marker + 1 < len(path):
-            return path[0], "/".join(path[1:marker]), path[marker + 1]
-    if host.endswith(".visualstudio.com") and "_git" in path:
-        marker = path.index("_git")
-        if marker >= 1 and marker + 1 < len(path):
-            return host.split(".", 1)[0], "/".join(path[:marker]), path[marker + 1]
+    if host == "dev.azure.com":
+        if not path:
+            return None, None, None
+        organization = f"{parsed.scheme}://{host}/{path[0]}"
+        if len(path) >= 3 and path[2] == "_git":
+            return organization, path[1], path[3] if len(path) >= 4 else None
+        if len(path) >= 2:
+            return organization, "/".join(path[1:]), None
+        return organization, None, None
+    if host.endswith(".visualstudio.com"):
+        organization = f"{parsed.scheme}://{host}"
+        if "_git" in path:
+            marker = path.index("_git")
+            if marker >= 1 and marker + 1 < len(path):
+                return organization, "/".join(path[:marker]), path[marker + 1]
+        if path:
+            return organization, "/".join(path), None
+        return organization, None, None
     return None, None, None
+
+
+def is_github_url(value: str | None) -> bool:
+    if not value:
+        return False
+    if value.startswith("git@github.com:"):
+        return True
+    host = urlparse(value).hostname or ""
+    return host == "github.com" or host.endswith(".github.com")
+
+
+def is_github_remote(cwd: Path | None = None) -> bool:
+    return is_github_url(git_remote(cwd))
 
 
 def git_remote(cwd: Path | None = None) -> str | None:
@@ -94,6 +122,13 @@ def resolve(repo_flag: str | None = None, cwd: Path | None = None) -> RepoContex
     organization = _first_env("AZ_GH_AZDO_ORG", "AZDO_ORG_URL", "AZURE_DEVOPS_ORG_URL")
     project = _first_env("AZ_GH_AZDO_PROJECT", "AZDO_PROJECT", "AZURE_DEVOPS_PROJECT")
     repository = _first_env("AZ_GH_AZDO_REPOSITORY", "AZDO_REPOSITORY", "AZURE_DEVOPS_REPOSITORY")
+
+    if organization and organization.startswith(("http://", "https://")):
+        env_org, env_project, env_repository = parse_remote(organization)
+        if env_org:
+            organization = env_org
+            project = project or env_project
+            repository = repository or env_repository
 
     remote = git_remote(cwd)
     if remote:

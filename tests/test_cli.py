@@ -9,12 +9,41 @@ import subprocess
 import tempfile
 import unittest
 
+from azgh.repository import parse_repo_flag, resolve
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "gh"
 
 
 class AzGhTests(unittest.TestCase):
+    def test_azure_project_urls_resolve_legacy_and_modern_forms(self) -> None:
+        self.assertEqual(
+            parse_repo_flag("https://tris790.visualstudio.com/ClaudeOps"),
+            ("https://tris790.visualstudio.com", "ClaudeOps", None),
+        )
+        self.assertEqual(
+            parse_repo_flag("https://dev.azure.com/tris790/ClaudeOps"),
+            ("https://dev.azure.com/tris790", "ClaudeOps", None),
+        )
+        self.assertEqual(
+            parse_repo_flag("https://tris790.visualstudio.com/ClaudeOps/_git/widget"),
+            ("https://tris790.visualstudio.com", "ClaudeOps", "widget"),
+        )
+
+    def test_project_url_can_supply_environment_context(self) -> None:
+        previous = os.environ.get("AZDO_ORG_URL")
+        try:
+            os.environ["AZDO_ORG_URL"] = "https://tris790.visualstudio.com/ClaudeOps"
+            context = resolve(cwd=Path("/does/not/exist"))
+        finally:
+            if previous is None:
+                os.environ.pop("AZDO_ORG_URL", None)
+            else:
+                os.environ["AZDO_ORG_URL"] = previous
+        self.assertEqual(context.organization, "https://tris790.visualstudio.com")
+        self.assertEqual(context.project, "ClaudeOps")
+
     def make_fake_az(self, directory: Path) -> Path:
         fake = directory / ("az.cmd" if os.name == "nt" else "az")
         fake.write_text(
@@ -101,6 +130,89 @@ else:
             self.assertEqual(api.returncode, 1)
             self.assertEqual(api.stdout, b"")
             self.assertEqual(api.stderr, b"accepts 1 arg(s), received 0\n")
+
+    def test_graphql_pull_request_search_is_translated_to_azure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            fake = self.make_fake_az(directory)
+            query = (
+                "query($searchQuery: String!, $first: Int!, $after: String) "
+                "{ search(query: $searchQuery, type: ISSUE, first: $first, after: $after) "
+                "{ issueCount nodes { __typename ... on PullRequest { number title } } "
+                "pageInfo { endCursor hasNextPage } } }"
+            )
+            completed = self.run_cli(
+                fake,
+                directory / "commands.jsonl",
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-f",
+                "searchQuery=is:pr archived:false user-review-requested:@me is:open sort:updated-desc",
+                "-f",
+                "after=null",
+                "-F",
+                "first=50",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result = json.loads(completed.stdout)
+            search = result["data"]["search"]
+            self.assertEqual(search["issueCount"], 1)
+            self.assertEqual(search["nodes"][0]["__typename"], "PullRequest")
+            self.assertEqual(search["nodes"][0]["number"], 42)
+            self.assertEqual(search["pageInfo"], {"endCursor": None, "hasNextPage": False})
+
+    def test_graphql_single_pull_request_queries_are_translated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            fake = self.make_fake_az(directory)
+            query = (
+                "query($owner: String!, $repo: String!, $number: Int!) "
+                "{ viewer { login } repository(owner: $owner, name: $repo) "
+                "{ pullRequest(number: $number) { body bodyHTML } } }"
+            )
+            completed = self.run_cli(
+                fake,
+                directory / "commands.jsonl",
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-f",
+                "owner=forgemo",
+                "-f",
+                "repo=ironstorm_lookup",
+                "-F",
+                "number=2",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result = json.loads(completed.stdout)
+            self.assertEqual(result["data"]["repository"]["pullRequest"]["body"], "")
+            self.assertEqual(result["data"]["viewer"]["login"], "alice@example.com")
+
+    def test_api_pull_request_url_is_converted_to_browser_url(self) -> None:
+        from azgh.prs import pr_url
+
+        self.assertEqual(
+            pr_url({
+                "pullRequestId": 42,
+                "url": "https://tris790.visualstudio.com/project-id/_apis/git/repositories/repo-id/pullRequests/42",
+                "repository": {
+                    "name": "ClaudeOps",
+                    "project": {"name": "ClaudeOps"},
+                },
+            }),
+            "https://tris790.visualstudio.com/ClaudeOps/_git/ClaudeOps/pullrequest/42",
+        )
+
+    def test_github_repository_commands_are_delegated(self) -> None:
+        from azgh.github import should_delegate
+
+        self.assertTrue(should_delegate(["pr", "list", "--repo", "https://github.com/tris790/az-gh"]))
+        self.assertTrue(should_delegate(["pr", "list", "--repo", "tris790/az-gh"]))
+        self.assertTrue(should_delegate(["api", "graphql", "--hostname", "github.com"]))
+        self.assertFalse(should_delegate(["pr", "list", "--repo", "https://tris790.visualstudio.com/ClaudeOps"]))
 
     def test_pr_list_text_matches_gh_tabular_shape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

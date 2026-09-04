@@ -5,7 +5,7 @@ import difflib
 import json
 import os
 from typing import Any, Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from .azcli import AzCli
 from .errors import CliError
@@ -25,13 +25,35 @@ def state(value: Any) -> str:
 
 
 def pr_url(data: dict[str, Any]) -> str | None:
+    api_url = data.get("url")
     links = data.get("_links")
     if isinstance(links, dict) and isinstance(links.get("web"), dict):
-        return links["web"].get("href")
+        href = links["web"].get("href")
+        if href and "/_apis/" not in href:
+            return href
+        api_url = href or api_url
     repository = data.get("repository") or {}
     base = repository.get("webUrl") if isinstance(repository, dict) else None
     number = data.get("pullRequestId") or data.get("number")
-    return f"{base}/pullrequest/{number}" if base and number else data.get("url")
+    if base and number:
+        return f"{base}/pullrequest/{number}"
+    project = repository.get("project") if isinstance(repository, dict) else None
+    project_name = project.get("name") if isinstance(project, dict) else None
+    repository_name = repository.get("name") if isinstance(repository, dict) else None
+    if api_url and number and project_name and repository_name:
+        parsed = urlparse(api_url)
+        host = parsed.hostname or ""
+        if host.endswith(".visualstudio.com"):
+            organization = f"{parsed.scheme}://{host}"
+        else:
+            path = [part for part in parsed.path.split("/") if part]
+            organization = f"{parsed.scheme}://{host}/{path[0]}" if host == "dev.azure.com" and path else None
+        if organization:
+            return (
+                f"{organization}/{quote(str(project_name), safe='')}/_git/"
+                f"{quote(str(repository_name), safe='')}/pullrequest/{number}"
+            )
+    return api_url
 
 
 def normalize_pr(data: dict[str, Any]) -> dict[str, Any]:
@@ -50,7 +72,7 @@ def normalize_pr(data: dict[str, Any]) -> dict[str, Any]:
         "author": {"login": creator_name} if creator_name else None,
         "isDraft": data.get("isDraft", False),
         "createdAt": data.get("creationDate", data.get("createdAt")),
-        "updatedAt": data.get("updatedDate", data.get("updatedAt", data.get("closedDate"))),
+        "updatedAt": data.get("updatedDate", data.get("updatedAt", data.get("closedDate", data.get("creationDate")))),
         "closedAt": data.get("closedDate"),
         "mergedAt": data.get("closedDate") if str(data.get("status", "")).lower() == "completed" else None,
         "repository": data.get("repository"),
@@ -97,20 +119,24 @@ def branch_for_azdo(value: str) -> str:
     return value if value.startswith("refs/") else f"refs/heads/{value}"
 
 
-def list_prs(az: AzCli, ctx: RepoContext, options: Any, emit: Callable[[str, bytes], None]) -> int:
+def fetch_prs(
+    az: AzCli,
+    ctx: RepoContext,
+    state_filter: str = "open",
+    limit: int | None = None,
+    author: str | None = None,
+    reviewer: str | None = None,
+) -> list[dict[str, Any]]:
     args = ["repos", "pr", "list"] + ctx.az_args()
-    state_filter = options.state or "open"
-    if options.head:
-        args += ["--source-branch", branch_for_azdo(options.head)]
-    if options.base:
-        args += ["--target-branch", branch_for_azdo(options.base)]
-    if options.author and options.author != "@me":
-        args += ["--creator", options.author]
-    elif options.author == "@me":
+    if author and author != "@me":
+        args += ["--creator", author]
+    elif author == "@me":
         user_data = account(az)
         user = configured_username(user_data)
         if user:
             args += ["--creator", user]
+    if reviewer:
+        args += ["--reviewer", reviewer]
     if state_filter == "open":
         args += ["--status", "active"]
     elif state_filter == "closed":
@@ -119,8 +145,8 @@ def list_prs(az: AzCli, ctx: RepoContext, options: Any, emit: Callable[[str, byt
         args += ["--status", "completed"]
     else:
         args += ["--status", "all"]
-    if options.limit:
-        args += ["--top", str(options.limit)]
+    if limit:
+        args += ["--top", str(limit)]
 
     raw = az.json(args)
     records = raw if isinstance(raw, list) else []
@@ -129,6 +155,18 @@ def list_prs(az: AzCli, ctx: RepoContext, options: Any, emit: Callable[[str, byt
         normalized = [item for item in normalized if item["state"] in {"CLOSED", "MERGED"}]
     elif state_filter == "merged":
         normalized = [item for item in normalized if item["state"] == "MERGED"]
+    return normalized
+
+
+def list_prs(az: AzCli, ctx: RepoContext, options: Any, emit: Callable[[str, bytes], None]) -> int:
+    state_filter = options.state or "open"
+    normalized = fetch_prs(
+        az,
+        ctx,
+        state_filter=state_filter,
+        limit=options.limit,
+        author=options.author,
+    )
 
     if options.json_fields:
         fields = [field.strip() for field in options.json_fields.split(",") if field.strip()]
@@ -166,12 +204,17 @@ def list_prs(az: AzCli, ctx: RepoContext, options: Any, emit: Callable[[str, byt
     return 0
 
 
-def show_pr(az: AzCli, ctx: RepoContext, number: str, options: Any, emit: Callable[[str, bytes], None]) -> int:
+def fetch_pr(az: AzCli, ctx: RepoContext, number: str) -> dict[str, Any]:
     args = ["repos", "pr", "show", "--id", number]
     if ctx.organization:
         args += ["--organization", ctx.organization]
     data = az.json(args)
-    normalized = normalize_pr(data if isinstance(data, dict) else {})
+    return data if isinstance(data, dict) else {}
+
+
+def show_pr(az: AzCli, ctx: RepoContext, number: str, options: Any, emit: Callable[[str, bytes], None]) -> int:
+    data = fetch_pr(az, ctx, number)
+    normalized = normalize_pr(data)
     if options.json_fields:
         fields = [field.strip() for field in options.json_fields.split(",") if field.strip()]
         output: Any = select_fields(normalized, fields)

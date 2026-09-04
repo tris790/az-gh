@@ -11,11 +11,12 @@ that runs `gh pr list` or `gh pr diff` does not need a provider-specific change.
 gh --version
 gh auth status [--active] [--hostname HOST]
 gh api user [--hostname HOST] [--jq EXPRESSION]
+gh api graphql -f query=... -f searchQuery=... -F first=N [-f after=...]
 gh pr list [--head BRANCH] [--base BRANCH] [--author USER|@me]
            [--state open|closed|all|merged] [--json FIELDS]
-           [--jq EXPRESSION] [--limit N] [--repo PROJECT/REPOSITORY]
-gh pr diff NUMBER [--repo PROJECT/REPOSITORY]
-gh pr view NUMBER [--json FIELDS] [--repo PROJECT/REPOSITORY]
+           [--jq EXPRESSION] [--limit N] [--repo PROJECT/REPOSITORY|AZURE_URL]
+gh pr diff NUMBER [--repo PROJECT/REPOSITORY|AZURE_URL]
+gh pr view NUMBER [--json FIELDS] [--repo PROJECT/REPOSITORY|AZURE_URL]
 ```
 
 The recorded `gh pr list --json number,url,state,headRefName` shape is
@@ -40,7 +41,8 @@ az devops configure --defaults organization=https://dev.azure.com/ORG project=PR
 
 The CLI resolves context in this order:
 
-1. `--repo` (`PROJECT/REPOSITORY`, or `ORGANIZATION/PROJECT/REPOSITORY`)
+1. `--repo` (`PROJECT/REPOSITORY`, `ORGANIZATION/PROJECT/REPOSITORY`, or an
+   Azure DevOps organization, project, or repository URL)
 2. `AZ_GH_AZDO_*` / `AZDO_*` environment variables
 3. the current Git `origin` Azure DevOps remote
 4. Azure CLI configured defaults
@@ -48,6 +50,16 @@ The CLI resolves context in this order:
 Useful explicit variables are `AZDO_ORG_URL`, `AZDO_PROJECT`,
 `AZDO_REPOSITORY`, and `AZDO_USER`. `AZ_GH_AZ` can point to a non-default
 Azure CLI executable for testing.
+
+Both Azure DevOps URL forms are accepted. For example, this project can be
+selected directly with:
+
+```sh
+gh pr list --repo https://tris790.visualstudio.com/ClaudeOps
+```
+
+The equivalent modern URL is
+`https://dev.azure.com/tris790/ClaudeOps`.
 
 On Linux/macOS, put this directory before other `gh` installations on `PATH`.
 On Windows, use the included `gh.cmd`, or install the package:
@@ -57,6 +69,15 @@ python -m pip install .
 ```
 
 The package installs a cross-platform `gh` console script.
+
+The launcher supports both providers. Commands run from a GitHub checkout,
+with a GitHub `--hostname`, or against a GitHub URL are forwarded to the
+installed GitHub CLI. Azure DevOps commands use `az`; setting `AZ_GH_AZ`
+explicitly forces Azure behavior, which is also useful for tests.
+
+`gh api graphql` supports the pull-request search query shape used by common
+GitHub integrations and translates it to Azure DevOps pull requests. It
+supports `query`, `searchQuery`, `first`, and an empty or `null` `after` field.
 
 ## Command recording
 

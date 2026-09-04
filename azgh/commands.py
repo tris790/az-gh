@@ -7,6 +7,8 @@ from typing import Any, Callable
 from . import __version__
 from .azcli import AzCli
 from .errors import CliError, CliExit
+from .github import run_github, should_delegate
+from .graphql import graphql_api
 from .identity import account, configured_username
 from .prs import diff_pr, list_prs, show_pr
 from .repository import resolve
@@ -203,6 +205,8 @@ def parser() -> Parser:
     api.add_argument("endpoint", nargs="?")
     api.add_argument("--hostname")
     api.add_argument("--jq")
+    api.add_argument("-f", "--raw-field", action="append", dest="raw_fields", default=[])
+    api.add_argument("-F", "--field", action="append", dest="typed_fields", default=[])
 
     pr = sub.add_parser("pr")
     pr.help_text = PR_HELP
@@ -236,6 +240,9 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
             emit(exc.stream, exc.message.encode("utf-8"))
         return exc.exit_code
 
+    if should_delegate(argv):
+        return run_github(argv, emit)
+
     if options.command is None:
         # Real gh treats a bare invocation as a help request and exits 0.
         emit("stdout", BARE_HELP.encode("utf-8"))
@@ -261,8 +268,10 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
         if options.endpoint is None:
             emit("stderr", b"accepts 1 arg(s), received 0\n")
             return 1
+        if options.endpoint.strip("/") == "graphql":
+            return graphql_api(az, resolve(), options.raw_fields, options.typed_fields, emit)
         if options.endpoint.strip("/") != "user":
-            raise CliError("az-gh: only the gh api user endpoint is supported")
+            raise CliError("az-gh: only the gh api user and graphql endpoints are supported")
         data = account(az)
         user = configured_username(data)
         result: Any = {
