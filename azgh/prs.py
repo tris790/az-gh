@@ -60,7 +60,7 @@ def normalize_pr(data: dict[str, Any]) -> dict[str, Any]:
 
 def select_fields(item: dict[str, Any], fields: list[str]) -> dict[str, Any]:
     output: dict[str, Any] = {}
-    for field in fields:
+    for field in sorted(fields):
         if field in item:
             output[field] = item[field]
         elif field == "headRepository" or field == "headRepositoryOwner":
@@ -79,6 +79,10 @@ def apply_jq(value: Any, expression: str | None) -> Any:
     if expression.startswith(".[] | "):
         expression = expression[6:].strip()
         return [apply_jq(item, expression) for item in value]
+    if expression.startswith("[].") and isinstance(value, list):
+        return [apply_jq(item, "." + expression[3:]) for item in value]
+    if expression.startswith(".[].") and isinstance(value, list):
+        return [apply_jq(item, "." + expression[4:]) for item in value]
     if expression.startswith(".") and isinstance(value, dict):
         current: Any = value
         for part in expression[1:].split("."):
@@ -130,11 +134,35 @@ def list_prs(az: AzCli, ctx: RepoContext, options: Any, emit: Callable[[str, byt
         fields = [field.strip() for field in options.json_fields.split(",") if field.strip()]
         result: Any = [select_fields(item, fields) for item in normalized]
         result = apply_jq(result, options.jq)
-        emit("stdout", (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        if options.jq and isinstance(result, list) and all(
+            isinstance(item, (str, int, float, bool)) or item is None for item in result
+        ):
+            output = "\n".join(
+                "null" if item is None else str(item).lower() if isinstance(item, bool) else str(item)
+                for item in result
+            )
+            if output:
+                output += "\n"
+        elif options.jq and isinstance(result, (str, int, float, bool)):
+            output = str(result).lower() if isinstance(result, bool) else str(result)
+            output += "\n"
+        else:
+            output = json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n"
+        emit("stdout", output.encode("utf-8"))
     else:
-        lines = ["NUMBER\tTITLE\tSTATE\tBRANCH"]
-        lines += [f"{item['number']}\t{item.get('title') or ''}\t{item['state']}\t{item.get('headRefName') or ''}" for item in normalized]
-        emit("stdout", ("\n".join(lines) + "\n").encode("utf-8"))
+        lines = [
+            "\t".join(
+                [
+                    str(item.get("number") or ""),
+                    item.get("title") or "",
+                    item.get("headRefName") or "",
+                    "DRAFT" if item.get("isDraft") else item["state"],
+                    item.get("createdAt") or "",
+                ]
+            )
+            for item in normalized
+        ]
+        emit("stdout", ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8"))
     return 0
 
 
@@ -147,9 +175,32 @@ def show_pr(az: AzCli, ctx: RepoContext, number: str, options: Any, emit: Callab
     if options.json_fields:
         fields = [field.strip() for field in options.json_fields.split(",") if field.strip()]
         output: Any = select_fields(normalized, fields)
+        output = apply_jq(output, getattr(options, "jq", None))
     else:
-        output = normalized
-    emit("stdout", (json.dumps(output, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        author = normalized.get("author") or {}
+        author_name = author.get("login") if isinstance(author, dict) else author
+        body = normalized.get("body") or ""
+        lines = [
+            f"title:\t{normalized.get('title') or ''}",
+            f"state:\t{normalized.get('state') or ''}",
+            f"author:\t{author_name or ''}",
+            "labels:\t",
+            "assignees:\t",
+            "reviewers:\t",
+            "projects:\t",
+            "milestone:\t",
+            f"number:\t{normalized.get('number') or ''}",
+            f"url:\t{normalized.get('url') or ''}",
+            f"additions:\t{normalized['raw'].get('additions', '')}",
+            f"deletions:\t{normalized['raw'].get('deletions', '')}",
+            "auto-merge:\tdisabled",
+            "--",
+        ]
+        if body:
+            lines.append(str(body).rstrip("\n"))
+        emit("stdout", ("\n".join(lines) + "\n").encode("utf-8"))
+        return 0
+    emit("stdout", (json.dumps(output, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
     return 0
 
 

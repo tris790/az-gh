@@ -68,7 +68,11 @@ else:
             log = Path(temporary) / "commands.jsonl"
             completed = self.run_cli(Path("az"), log, "--version")
             self.assertEqual(completed.returncode, 0)
-            self.assertIn(b"gh version", completed.stdout)
+            self.assertEqual(
+                completed.stdout,
+                b"gh version 0.1.0 (Azure DevOps)\n"
+                b"https://github.com/cli/cli/releases/tag/v0.1.0\n",
+            )
             records = self.read_records(log)
             self.assertEqual([item["event"] for item in records], ["start", "output", "result"])
             self.assertEqual(records[0]["argv"], ["--version"])
@@ -78,8 +82,33 @@ else:
             log = Path(temporary) / "commands.jsonl"
             completed = self.run_cli(Path("az"), log)
             self.assertEqual(completed.returncode, 0)
-            self.assertIn(b"usage: gh", completed.stdout.lower())
+            self.assertIn(b"USAGE\n  gh <command> <subcommand> [flags]", completed.stdout)
             self.assertIn(b"pr", completed.stdout)
+
+    def test_empty_subcommands_follow_gh_output_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+
+            auth = self.run_cli(Path("az"), directory / "auth.jsonl", "auth")
+            self.assertEqual(auth.returncode, 0)
+            self.assertIn(b"USAGE\n  gh auth <command> [flags]", auth.stdout)
+
+            pr = self.run_cli(Path("az"), directory / "pr.jsonl", "pr")
+            self.assertEqual(pr.returncode, 0)
+            self.assertIn(b"USAGE\n  gh pr <command> [flags]", pr.stdout)
+
+            api = self.run_cli(Path("az"), directory / "api.jsonl", "api")
+            self.assertEqual(api.returncode, 1)
+            self.assertEqual(api.stdout, b"")
+            self.assertEqual(api.stderr, b"accepts 1 arg(s), received 0\n")
+
+    def test_pr_list_text_matches_gh_tabular_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            fake = self.make_fake_az(directory)
+            completed = self.run_cli(fake, directory / "commands.jsonl", "pr", "list")
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, b"42\tImprove parser\tmain\tOPEN\t\n")
 
     def test_pr_list_maps_gh_fields_and_azure_flags(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -93,6 +122,10 @@ else:
                 "--json", "number,url,state,headRefName", "--repo", "Tools/widget",
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                completed.stdout,
+                b'[{"headRefName":"main","number":42,"state":"OPEN","url":"https://dev.azure.com/acme/Tools/_git/widget/pullrequest/42"}]\n',
+            )
             data = json.loads(completed.stdout)
             self.assertEqual(data, [{
                 "number": 42,
