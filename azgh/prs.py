@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+import base64
+import difflib
+import json
+import os
+from typing import Any, Callable
+from urllib.parse import quote
+
+from .azcli import AzCli
+from .errors import CliError
+from .identity import account, configured_username
+from .repository import RepoContext
+
+
+def strip_ref(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.removeprefix("refs/heads/")
+    return value
+
+
+def state(value: Any) -> str:
+    normalized = str(value or "").lower()
+    return {"active": "OPEN", "completed": "MERGED", "abandoned": "CLOSED"}.get(normalized, normalized.upper())
+
+
+def pr_url(data: dict[str, Any]) -> str | None:
+    links = data.get("_links")
+    if isinstance(links, dict) and isinstance(links.get("web"), dict):
+        return links["web"].get("href")
+    repository = data.get("repository") or {}
+    base = repository.get("webUrl") if isinstance(repository, dict) else None
+    number = data.get("pullRequestId") or data.get("number")
+    return f"{base}/pullrequest/{number}" if base and number else data.get("url")
+
+
+def normalize_pr(data: dict[str, Any]) -> dict[str, Any]:
+    creator = data.get("createdBy") or data.get("author") or {}
+    creator_name = creator.get("displayName") or creator.get("uniqueName") if isinstance(creator, dict) else creator
+    source = data.get("sourceRefName") or data.get("headRefName")
+    target = data.get("targetRefName") or data.get("baseRefName")
+    return {
+        "number": data.get("pullRequestId", data.get("number")),
+        "url": pr_url(data),
+        "state": state(data.get("status", data.get("state"))),
+        "headRefName": strip_ref(source),
+        "baseRefName": strip_ref(target),
+        "title": data.get("title"),
+        "body": data.get("description", data.get("body")),
+        "author": {"login": creator_name} if creator_name else None,
+        "isDraft": data.get("isDraft", False),
+        "createdAt": data.get("creationDate", data.get("createdAt")),
+        "updatedAt": data.get("updatedDate", data.get("updatedAt", data.get("closedDate"))),
+        "closedAt": data.get("closedDate"),
+        "mergedAt": data.get("closedDate") if str(data.get("status", "")).lower() == "completed" else None,
+        "repository": data.get("repository"),
+        "raw": data,
+    }
+
+
+def select_fields(item: dict[str, Any], fields: list[str]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for field in fields:
+        if field in item:
+            output[field] = item[field]
+        elif field == "headRepository" or field == "headRepositoryOwner":
+            output[field] = None
+        elif field in item.get("raw", {}):
+            output[field] = item["raw"][field]
+        else:
+            output[field] = None
+    return output
+
+
+def apply_jq(value: Any, expression: str | None) -> Any:
+    if not expression:
+        return value
+    expression = expression.strip()
+    if expression.startswith(".[] | "):
+        expression = expression[6:].strip()
+        return [apply_jq(item, expression) for item in value]
+    if expression.startswith(".") and isinstance(value, dict):
+        current: Any = value
+        for part in expression[1:].split("."):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+        return current
+    raise CliError(f"az-gh: unsupported --jq expression: {expression}")
+
+
+def branch_for_azdo(value: str) -> str:
+    return value if value.startswith("refs/") else f"refs/heads/{value}"
+
+
+def list_prs(az: AzCli, ctx: RepoContext, options: Any, emit: Callable[[str, bytes], None]) -> int:
+    args = ["repos", "pr", "list"] + ctx.az_args()
+    state_filter = options.state or "open"
+    if options.head:
+        args += ["--source-branch", branch_for_azdo(options.head)]
+    if options.base:
+        args += ["--target-branch", branch_for_azdo(options.base)]
+    if options.author and options.author != "@me":
+        args += ["--creator", options.author]
+    elif options.author == "@me":
+        user_data = account(az)
+        user = configured_username(user_data)
+        if user:
+            args += ["--creator", user]
+    if state_filter == "open":
+        args += ["--status", "active"]
+    elif state_filter == "closed":
+        args += ["--status", "all"]
+    elif state_filter in {"merged", "completed"}:
+        args += ["--status", "completed"]
+    else:
+        args += ["--status", "all"]
+    if options.limit:
+        args += ["--top", str(options.limit)]
+
+    raw = az.json(args)
+    records = raw if isinstance(raw, list) else []
+    normalized = [normalize_pr(item) for item in records if isinstance(item, dict)]
+    if state_filter == "closed":
+        normalized = [item for item in normalized if item["state"] in {"CLOSED", "MERGED"}]
+    elif state_filter == "merged":
+        normalized = [item for item in normalized if item["state"] == "MERGED"]
+
+    if options.json_fields:
+        fields = [field.strip() for field in options.json_fields.split(",") if field.strip()]
+        result: Any = [select_fields(item, fields) for item in normalized]
+        result = apply_jq(result, options.jq)
+        emit("stdout", (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    else:
+        lines = ["NUMBER\tTITLE\tSTATE\tBRANCH"]
+        lines += [f"{item['number']}\t{item.get('title') or ''}\t{item['state']}\t{item.get('headRefName') or ''}" for item in normalized]
+        emit("stdout", ("\n".join(lines) + "\n").encode("utf-8"))
+    return 0
+
+
+def show_pr(az: AzCli, ctx: RepoContext, number: str, options: Any, emit: Callable[[str, bytes], None]) -> int:
+    args = ["repos", "pr", "show", "--id", number]
+    if ctx.organization:
+        args += ["--organization", ctx.organization]
+    data = az.json(args)
+    normalized = normalize_pr(data if isinstance(data, dict) else {})
+    if options.json_fields:
+        fields = [field.strip() for field in options.json_fields.split(",") if field.strip()]
+        output: Any = select_fields(normalized, fields)
+    else:
+        output = normalized
+    emit("stdout", (json.dumps(output, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    return 0
+
+
+def _content(value: Any) -> str:
+    if isinstance(value, dict):
+        content = value.get("content", "")
+        if value.get("contentType") == "base64Encoded":
+            try:
+                return base64.b64decode(content).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                return ""
+        return str(content)
+    return str(value or "")
+
+
+def _item_content(az: AzCli, ctx: RepoContext, repository_id: str, path: str, commit: str) -> str:
+    args = [
+        "devops", "invoke", "--area", "git", "--resource", "items",
+        "--route-parameters", f"project={ctx.project or ''}", f"repositoryId={repository_id}",
+        "--query-parameters",
+        f"path={quote(path)}&versionDescriptor.version={commit}&versionDescriptor.versionType=commit&includeContent=true",
+        "--api-version", "7.1-preview.1",
+    ]
+    if ctx.organization:
+        args += ["--organization", ctx.organization]
+    data = az.json(args)
+    return _content(data)
+
+
+def diff_pr(az: AzCli, ctx: RepoContext, number: str, emit: Callable[[str, bytes], None]) -> int:
+    if not ctx.project:
+        raise CliError("az-gh: Azure project is required for pr diff; set AZDO_PROJECT or use --repo PROJECT/REPOSITORY")
+    show_args = ["repos", "pr", "show", "--id", number]
+    if ctx.organization:
+        show_args += ["--organization", ctx.organization]
+    details = az.json(show_args)
+    if not isinstance(details, dict):
+        raise CliError("az-gh: Azure CLI returned no pull request details")
+    repository = details.get("repository") or {}
+    repository_id = str(repository.get("id") or ctx.repository or "")
+    source_commit = (details.get("lastMergeSourceCommit") or {}).get("commitId")
+    target_commit = (details.get("lastMergeTargetCommit") or {}).get("commitId")
+    if not repository_id or not source_commit or not target_commit:
+        raise CliError("az-gh: pull request is missing repository or merge commit information")
+
+    args = [
+        "devops", "invoke", "--area", "git", "--resource", "diffs",
+        "--route-parameters", f"project={ctx.project}", f"repositoryId={repository_id}",
+        "--query-parameters", f"baseVersion={target_commit}&targetVersion={source_commit}",
+        "--api-version", "7.1-preview.1",
+    ]
+    if ctx.organization:
+        args += ["--organization", ctx.organization]
+    diff_data = az.json(args)
+    changes = diff_data.get("changes", []) if isinstance(diff_data, dict) else []
+    chunks: list[str] = []
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        item = change.get("item") or {}
+        path = item.get("path") or change.get("path")
+        if not path or item.get("isFolder"):
+            continue
+        original_path = change.get("originalPath") or path
+        change_type = str(change.get("changeType", "edit")).lower()
+        old_text = _content(change.get("originalContent")) if "originalContent" in change else ""
+        new_text = _content(change.get("newContent")) if "newContent" in change else ""
+        if "originalContent" not in change and change_type not in {"add", "new"}:
+            old_text = _item_content(az, ctx, repository_id, original_path, target_commit)
+        if "newContent" not in change and change_type not in {"delete", "remove"}:
+            new_text = _item_content(az, ctx, repository_id, path, source_commit)
+        old_lines = old_text.splitlines(keepends=True)
+        new_lines = new_text.splitlines(keepends=True)
+        header = f"diff --git a{original_path} b{path}\n"
+        patch = "".join(difflib.unified_diff(old_lines, new_lines, fromfile=f"a{original_path}", tofile=f"b{path}", lineterm="\n"))
+        if patch and not patch.endswith("\n"):
+            patch += "\n"
+        chunks.append(header + patch)
+    emit("stdout", "".join(chunks).encode("utf-8"))
+    return 0

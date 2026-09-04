@@ -1,0 +1,4 @@
+/commands.jsonl
+/commands.jsonl.lock
+__pycache__/
+*.py[cod]
