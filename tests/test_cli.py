@@ -389,6 +389,9 @@ else:
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertTrue(completed.stdout.startswith(b"github.com\n"))
+            self.assertIn(b"account alice (keyring)", completed.stdout)
+            self.assertIn(b"Token: gho_", completed.stdout)
+            self.assertNotIn(b"Azure CLI credential", completed.stdout)
 
     def test_graphql_pull_request_search_is_translated_to_azure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

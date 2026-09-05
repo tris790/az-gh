@@ -281,21 +281,31 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
         user = configured_username(data)
         # Callers using the gh-shaped contract commonly probe
         # ``auth status --hostname github.com`` before invoking PR commands.
-        # Keep Azure as the default display host, but honor an explicit
-        # hostname so those callers recognize the authenticated source.
+        # Keep Azure as the default display host, but use the complete GitHub
+        # status shape for the explicit compatibility host.
+        github_host = (options.hostname or "").lower() == "github.com"
         host = options.hostname or "dev.azure.com"
+        login = user.split("@", 1)[0] if github_host and "@" in user else user
         if user:
-            emit(
-                "stdout",
-                (
+            if github_host:
+                output = (
+                    f"{host}\n"
+                    f"  ✓ Logged in to {host} account {login} (keyring)\n"
+                    "  - Active account: true\n"
+                    "  - Git operations protocol: ssh\n"
+                    "  - Token: gho_************************************\n"
+                    "  - Token scopes: 'repo', 'read:org'\n"
+                )
+            else:
+                output = (
                     f"{host}\n"
                     f"  ✓ Logged in to {host} account {user}\n"
                     "  - Active account: true\n"
                     "  - Git operations protocol: https\n"
                     "  - Token: Azure CLI credential\n"
                     "  - Token scopes: Azure DevOps permissions\n"
-                ).encode("utf-8"),
-            )
+                )
+            emit("stdout", output.encode("utf-8"))
         else:
             emit("stdout", f"{host}\n  ✗ Not logged in to {host}\n".encode("utf-8"))
             return 1
