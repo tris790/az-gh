@@ -44,8 +44,20 @@ class AzGhTests(unittest.TestCase):
             ("https://dev.azure.com/tris790", "ClaudeOps", "widget"),
         )
         self.assertEqual(
+            parse_repo_flag("https://dev.azure.com/tris790/video%20cloud"),
+            ("https://dev.azure.com/tris790", "video cloud", None),
+        )
+        self.assertEqual(
             parse_repo_flag("https://tris790.visualstudio.com/ClaudeOps/_git/widget"),
             ("https://tris790.visualstudio.com", "ClaudeOps", "widget"),
+        )
+
+    def test_project_names_with_spaces_remain_one_azure_argument(self) -> None:
+        from azgh.repository import RepoContext
+
+        self.assertEqual(
+            RepoContext("https://dev.azure.com/tris790", "video cloud", None).az_args(),
+            ["--organization", "https://dev.azure.com/tris790", "--project", "video cloud"],
         )
 
     def test_project_url_can_supply_environment_context(self) -> None:
@@ -366,6 +378,17 @@ else:
             self.assertEqual(api.returncode, 1)
             self.assertEqual(api.stdout, b"")
             self.assertEqual(api.stderr, b"accepts 1 arg(s), received 0\n")
+
+    def test_auth_status_honors_requested_hostname(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            completed = self.run_cli(
+                self.make_fake_az(directory),
+                directory / "auth-status.jsonl",
+                "auth", "status", "--active", "--hostname", "github.com",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(completed.stdout.startswith(b"github.com\n"))
 
     def test_graphql_pull_request_search_is_translated_to_azure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

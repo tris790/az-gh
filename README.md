@@ -21,6 +21,18 @@ The `organization` value must end at the organization name. For a URL such as
 `https://dev.azure.com/ORG/PROJECT`, use
 `organization=https://dev.azure.com/ORG project=PROJECT`.
 
+Project names containing spaces are supported. Quote the complete default
+assignment, not only part of its value:
+
+```powershell
+az devops configure --defaults `
+  "organization=https://dev.azure.com/ORG" `
+  "project=video cloud"
+```
+
+When passing that project as a URL, quote the URL and encode the space:
+`gh pr list --repo "https://dev.azure.com/ORG/video%20cloud"`.
+
 Verify that the shim, rather than the official GitHub CLI, is being invoked:
 
 ```sh

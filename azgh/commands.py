@@ -278,7 +278,11 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
     if options.command == "auth" and options.auth_command == "status":
         data = account(az)
         user = configured_username(data)
-        host = "dev.azure.com"
+        # Callers using the gh-shaped contract commonly probe
+        # ``auth status --hostname github.com`` before invoking PR commands.
+        # Keep Azure as the default display host, but honor an explicit
+        # hostname so those callers recognize the authenticated source.
+        host = options.hostname or "dev.azure.com"
         if user:
             emit(
                 "stdout",
