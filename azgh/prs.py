@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import difflib
+import html
 import json
 import os
 import re
@@ -10,8 +11,6 @@ import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 from urllib.parse import quote, unquote, urlparse
-
-from markdown_it import MarkdownIt
 
 from .azcli import AzCli
 from .errors import CliError
@@ -96,44 +95,202 @@ def _linkify_plain_urls(text: str) -> str:
     return "\n".join(lines)
 
 
-def _link_open(tokens: list[Any], index: int, options: Any, env: Any, renderer: MarkdownIt) -> str:
-    token = tokens[index]
-    token.attrSet("rel", "nofollow")
-    return renderer.renderer.renderToken(tokens, index, options, env)
+def _escape_text(value: str) -> str:
+    return html.escape(value, quote=False)
 
 
-def _block_open(tokens: list[Any], index: int, options: Any, env: Any, renderer: MarkdownIt) -> str:
-    token = tokens[index]
-    token.attrSet("dir", "auto")
-    return renderer.renderer.renderToken(tokens, index, options, env)
+def _escape_attribute(value: str) -> str:
+    return html.escape(value, quote=True)
 
 
-def _line_break(tokens: list[Any], index: int, options: Any, env: Any) -> str:
-    return "<br>\n"
+def _matching_delimiter(text: str, start: int, delimiter: str) -> int:
+    return text.find(delimiter, start + len(delimiter))
 
 
-def _markdown_renderer() -> MarkdownIt:
-    renderer = MarkdownIt(
-        "default",
-        {
-            "breaks": True,
-            "html": False,
-            "linkify": False,
-        },
-    )
+def _matching_bracket(text: str, start: int, opening: str, closing: str) -> int:
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == opening:
+            depth += 1
+        elif text[index] == closing:
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
 
-    def link_open(tokens: list[Any], index: int, options: Any, env: Any) -> str:
-        return _link_open(tokens, index, options, env, renderer)
 
-    def block_open(tokens: list[Any], index: int, options: Any, env: Any) -> str:
-        return _block_open(tokens, index, options, env, renderer)
+def _link_parts(value: str) -> tuple[str, str | None] | None:
+    value = value.strip()
+    if not value:
+        return None
+    title: str | None = None
+    if " \"" in value:
+        destination, title_value = value.split(" \"", 1)
+        if title_value.endswith("\""):
+            title = title_value[:-1]
+            value = destination
+    elif " '" in value:
+        destination, title_value = value.split(" '", 1)
+        if title_value.endswith("'"):
+            title = title_value[:-1]
+            value = destination
+    return value.strip("<>").strip(), title
 
-    for rule in ("paragraph_open", "heading_open", "bullet_list_open", "ordered_list_open"):
-        renderer.renderer.rules[rule] = block_open
-    renderer.renderer.rules["link_open"] = link_open
-    renderer.renderer.rules["softbreak"] = _line_break
-    renderer.renderer.rules["hardbreak"] = _line_break
-    return renderer
+
+def _inline_html(text: str) -> str:
+    """Render the inline Markdown subset used by Azure pull-request bodies."""
+    output: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] == "\\" and index + 1 < len(text) and text[index + 1] in r"\\`*{}[]()#+-.!_>~":
+            output.append(_escape_text(text[index + 1]))
+            index += 2
+            continue
+
+        if text[index] == "`":
+            run_end = index
+            while run_end < len(text) and text[run_end] == "`":
+                run_end += 1
+            delimiter = text[index:run_end]
+            end = text.find(delimiter, run_end)
+            if end >= 0:
+                code = text[run_end:end].replace("\n", " ")
+                if code.startswith(" ") and code.endswith(" ") and code.strip():
+                    code = code[1:-1]
+                output.append(f"<code>{_escape_text(code)}</code>")
+                index = end + len(delimiter)
+                continue
+
+        if text.startswith("![", index) or text[index] == "[":
+            image = text.startswith("![", index)
+            label_start = index + 2 if image else index + 1
+            label_end = _matching_bracket(text, label_start - 1, "[", "]")
+            if label_end >= 0 and label_end + 1 < len(text) and text[label_end + 1] == "(":
+                destination_end = _matching_bracket(text, label_end + 1, "(", ")")
+                if destination_end >= 0:
+                    parts = _link_parts(text[label_end + 2:destination_end])
+                    if parts:
+                        destination, title = parts
+                        label = text[label_start:label_end]
+                        if image:
+                            rendered = f'<img src="{_escape_attribute(destination)}" alt="{_escape_attribute(label)}"'
+                            if title is not None:
+                                rendered += f' title="{_escape_attribute(title)}"'
+                            output.append(rendered + ">")
+                        else:
+                            rendered = f'<a href="{_escape_attribute(destination)}" rel="nofollow"'
+                            if title is not None:
+                                rendered += f' title="{_escape_attribute(title)}"'
+                            output.append(rendered + f">{_inline_html(label)}</a>")
+                        index = destination_end + 1
+                        continue
+
+        if text[index] == "<":
+            end = text.find(">", index + 1)
+            if end >= 0:
+                value = text[index + 1:end]
+                if re.match(r"(?i)https?://[^\s<>]+$", value) or re.match(r"(?i)mailto:[^\s<>]+$", value):
+                    output.append(
+                        f'<a href="{_escape_attribute(value)}" rel="nofollow">'
+                        f"{_escape_text(value.removeprefix('mailto:'))}</a>"
+                    )
+                    index = end + 1
+                    continue
+
+        matched = False
+        for delimiter, tag in (("**", "strong"), ("__", "strong"), ("~~", "s"), ("*", "em"), ("_", "em")):
+            if text.startswith(delimiter, index):
+                end = _matching_delimiter(text, index, delimiter)
+                if end > index + len(delimiter):
+                    output.append(f"<{tag}>{_inline_html(text[index + len(delimiter):end])}</{tag}>")
+                    index = end + len(delimiter)
+                    matched = True
+                    break
+        if matched:
+            continue
+
+        if text[index] == "\n":
+            output.append("<br>\n")
+            index += 1
+            continue
+
+        next_special = index + 1
+        while next_special < len(text) and text[next_special] not in "\\`[<!*_~\n":
+            next_special += 1
+        output.append(_escape_text(text[index:next_special]))
+        index = next_special
+    return "".join(output)
+
+
+def _render_markdown_blocks(lines: list[str]) -> list[str]:
+    blocks: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not lines[index].strip():
+            index += 1
+            continue
+
+        fence = re.match(r"^\s{0,3}(`{3,}|~{3,})(.*)$", lines[index])
+        if fence:
+            marker = fence.group(1)
+            info = fence.group(2).strip().split(None, 1)[0] if fence.group(2).strip() else ""
+            index += 1
+            code_lines: list[str] = []
+            while index < len(lines) and not re.match(rf"^\s{{0,3}}{re.escape(marker[0])}{{{len(marker)},}}\s*$", lines[index]):
+                code_lines.append(lines[index])
+                index += 1
+            if index < len(lines):
+                index += 1
+            class_name = f' class="language-{_escape_attribute(info)}"' if info else ""
+            blocks.append(f"<pre><code{class_name}>{_escape_text(chr(10).join(code_lines) + chr(10))}</code></pre>")
+            continue
+
+        heading = re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$", lines[index])
+        if heading:
+            level = len(heading.group(1))
+            blocks.append(f'<h{level} dir="auto">{_inline_html(heading.group(2))}</h{level}>')
+            index += 1
+            continue
+
+        if re.match(r"^\s{0,3}((\*\s*){3,}|(-\s*){3,}|(_\s*){3,})$", lines[index]):
+            blocks.append("<hr>")
+            index += 1
+            continue
+
+        quote_lines: list[str] = []
+        while index < len(lines) and (match := re.match(r"^\s{0,3}> ?(.*)$", lines[index])):
+            quote_lines.append(match.group(1))
+            index += 1
+        if quote_lines:
+            inner = "\n".join(_render_markdown_blocks(quote_lines))
+            blocks.append(f"<blockquote>\n{inner}\n</blockquote>")
+            continue
+
+        list_match = re.match(r"^\s{0,3}([-+*])\s+(.*)$", lines[index]) or re.match(r"^\s{0,3}(\d+)[.)]\s+(.*)$", lines[index])
+        if list_match:
+            ordered = list_match.group(1).isdigit()
+            items: list[str] = []
+            while index < len(lines):
+                current = re.match(r"^\s{0,3}(\d+)[.)]\s+(.*)$", lines[index]) if ordered else re.match(r"^\s{0,3}[-+*]\s+(.*)$", lines[index])
+                if not current:
+                    break
+                item_text = current.group(2) if ordered else current.group(1)
+                items.append(f"<li>{_inline_html(item_text)}</li>")
+                index += 1
+            tag = "ol" if ordered else "ul"
+            blocks.append(f'<{tag} dir="auto">\n' + "\n".join(items) + f"\n</{tag}>")
+            continue
+
+        paragraph: list[str] = [lines[index]]
+        index += 1
+        while index < len(lines) and lines[index].strip():
+            if re.match(r"^\s{0,3}(#{1,6})\s+", lines[index]) or re.match(r"^\s{0,3}([-+*])\s+", lines[index]) or re.match(r"^\s{0,3}> ?", lines[index]):
+                break
+            paragraph.append(lines[index])
+            index += 1
+        paragraph_text = "\n".join(line[:-2] if line.endswith("  ") else line for line in paragraph)
+        blocks.append(f'<p dir="auto">{_inline_html(paragraph_text)}</p>')
+    return blocks
 
 
 def markdown_to_html(value: Any) -> str:
@@ -142,7 +299,7 @@ def markdown_to_html(value: Any) -> str:
     if not text:
         return ""
     text = _linkify_plain_urls(text)
-    return _markdown_renderer().render(text).removesuffix("\n")
+    return "\n".join(_render_markdown_blocks(text.split("\n")))
 
 
 def pr_url(data: dict[str, Any]) -> str | None:

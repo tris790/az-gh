@@ -14,6 +14,9 @@ az devops configure --defaults organization=https://dev.azure.com/ORG project=PR
 python -m pip install /path/to/az-gh
 ```
 
+The shim has no Python runtime dependencies. If running the checked-out
+`gh.cmd` directly, package installation is optional.
+
 The `organization` value must end at the organization name. For a URL such as
 `https://dev.azure.com/ORG/PROJECT`, use
 `organization=https://dev.azure.com/ORG project=PROJECT`.
