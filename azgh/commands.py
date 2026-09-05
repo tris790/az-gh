@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from typing import Any, Callable
 
 from . import __version__
 from .azcli import AzCli
 from .errors import CliError, CliExit
-from .github import run_github, should_delegate
+from .github import run_github, run_official_github, should_delegate
 from .graphql import graphql_api
-from .identity import account, configured_username
-from .prs import diff_pr, list_prs, show_pr
+from .identity import account, configured_username, profile
+from .prs import (
+    api_pull_request_comment,
+    comment_pr,
+    diff_pr,
+    is_pull_request_comment_endpoint,
+    list_prs,
+    show_pr,
+)
 from .repository import resolve
 
 
@@ -204,6 +212,7 @@ def parser() -> Parser:
     api = sub.add_parser("api")
     api.add_argument("endpoint", nargs="?")
     api.add_argument("--hostname")
+    api.add_argument("-X", "--method")
     api.add_argument("--jq")
     api.add_argument("-f", "--raw-field", action="append", dest="raw_fields", default=[])
     api.add_argument("-F", "--field", action="append", dest="typed_fields", default=[])
@@ -219,13 +228,25 @@ def parser() -> Parser:
     pr_list.add_argument("--json", dest="json_fields")
     pr_list.add_argument("--jq")
     pr_list.add_argument("--limit", type=int)
-    pr_list.add_argument("--repo")
+    pr_list.add_argument("-R", "--repo")
     pr_diff = pr_sub.add_parser("diff")
     pr_diff.add_argument("number")
-    pr_diff.add_argument("--repo")
+    pr_diff.add_argument("-R", "--repo")
+    pr_comment = pr_sub.add_parser("comment")
+    pr_comment.add_argument("number", nargs="?")
+    pr_comment.add_argument("-R", "--repo")
+    pr_comment.add_argument("-b", "--body")
+    pr_comment.add_argument("-F", "--body-file")
+    pr_comment.add_argument("--edit-last", action="store_true")
+    pr_comment.add_argument("--delete-last", action="store_true")
+    pr_comment.add_argument("--create-if-none", action="store_true")
+    pr_comment.add_argument("--yes", action="store_true")
+    pr_comment.add_argument("-e", "--editor", action="store_true")
+    pr_comment.add_argument("-w", "--web", action="store_true")
+    pr_comment.add_argument("--attach", action="append", default=[])
     pr_show = pr_sub.add_parser("view", aliases=["show"])
     pr_show.add_argument("number")
-    pr_show.add_argument("--repo")
+    pr_show.add_argument("-R", "--repo")
     pr_show.add_argument("--json", dest="json_fields")
     pr_show.add_argument("--jq")
     return root
@@ -259,7 +280,17 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
         user = configured_username(data)
         host = "dev.azure.com"
         if user:
-            emit("stdout", f"{host}\n  ✓ Logged in to {host} account {user}\n  - Active account: true\n".encode("utf-8"))
+            emit(
+                "stdout",
+                (
+                    f"{host}\n"
+                    f"  ✓ Logged in to {host} account {user}\n"
+                    "  - Active account: true\n"
+                    "  - Git operations protocol: https\n"
+                    "  - Token: Azure CLI credential\n"
+                    "  - Token scopes: Azure DevOps permissions\n"
+                ).encode("utf-8"),
+            )
         else:
             emit("stdout", f"{host}\n  ✗ Not logged in to {host}\n".encode("utf-8"))
             return 1
@@ -269,16 +300,78 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
             emit("stderr", b"accepts 1 arg(s), received 0\n")
             return 1
         if options.endpoint.strip("/") == "graphql":
-            return graphql_api(az, resolve(), options.raw_fields, options.typed_fields, emit)
+            return graphql_api(
+                az,
+                resolve(),
+                options.raw_fields,
+                options.typed_fields,
+                emit,
+                hostname=options.hostname,
+            )
+        if is_pull_request_comment_endpoint(options.endpoint):
+            return api_pull_request_comment(
+                az,
+                resolve(),
+                options.endpoint,
+                options.method,
+                options.raw_fields,
+                options.typed_fields,
+                options.jq,
+                emit,
+            )
         if options.endpoint.strip("/") != "user":
             raise CliError("az-gh: only the gh api user and graphql endpoints are supported")
         data = account(az)
         user = configured_username(data)
+        identity = profile(az, user)
+        identity_user = identity.get("user") if isinstance(identity.get("user"), dict) else {}
+        identity_id = str(identity.get("id") or user or "azure-user")
+        # GitHub's user endpoint exposes a numeric id. Azure identities use a
+        # GUID, so retain the Azure id in node_id and derive a stable numeric
+        # compatibility id for clients that deserialize the GitHub shape.
+        # Keep the compatibility id within JavaScript's safe integer range.
+        # The app consuming this GitHub-shaped record parses JSON numbers as
+        # IEEE-754 doubles; an unrestricted 64-bit hash would silently lose
+        # precision and can make the otherwise valid user payload fail its
+        # schema/identity checks.
+        numeric_id = int.from_bytes(hashlib.sha256(identity_id.encode("utf-8")).digest()[:8], "big") % (2**53 - 1)
+        user_url = str(identity_user.get("url") or "https://dev.azure.com/")
+        api_root = user_url.split("/_apis/", 1)[0].rstrip("/")
         result: Any = {
             "login": user,
-            "id": (data.get("user") or {}).get("id") if isinstance(data.get("user"), dict) else None,
-            "name": user,
-            "url": "https://dev.azure.com/",
+            "id": numeric_id,
+            "node_id": identity_id,
+            "avatar_url": str(identity_user.get("imageUrl") or f"{api_root}/_apis/Graph/Users/{identity_id}/image"),
+            "gravatar_id": "",
+            "url": user_url,
+            "html_url": user_url,
+            "followers_url": f"{api_root}/users/{user}/followers",
+            "following_url": f"{api_root}/users/{user}/following{{/other_user}}",
+            "gists_url": f"{api_root}/gists{{/gist_id}}",
+            "starred_url": f"{api_root}/starred{{/owner}}{{/repo}}",
+            "subscriptions_url": f"{api_root}/subscriptions",
+            "organizations_url": f"{api_root}/orgs",
+            "repos_url": f"{api_root}/repos",
+            "events_url": f"{api_root}/events{{/privacy}}",
+            "received_events_url": f"{api_root}/received_events",
+            "type": "User",
+            "user_view_type": "public",
+            "site_admin": False,
+            "name": identity_user.get("displayName") or user,
+            "company": None,
+            "blog": "",
+            "location": None,
+            "email": None,
+            "hireable": None,
+            "bio": "",
+            "twitter_username": None,
+            "notification_email": None,
+            "public_repos": 0,
+            "public_gists": 0,
+            "followers": 0,
+            "following": 0,
+            "created_at": "",
+            "updated_at": "",
         }
         if options.jq:
             from .prs import apply_jq
@@ -291,21 +384,28 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
         emit("stdout", (output + "\n").encode("utf-8"))
         return 0
     if options.command == "pr":
-        if options.pr_command not in {"list", "diff", "view", "show"}:
+        if options.pr_command not in {"list", "diff", "comment", "view", "show"}:
             raise CliError("gh pr: a subcommand is required")
         ctx = resolve(getattr(options, "repo", None))
         if options.pr_command == "list":
             return list_prs(az, ctx, options, emit)
         if options.pr_command == "diff":
             return diff_pr(az, ctx, options.number, emit)
+        if options.pr_command == "comment":
+            return comment_pr(az, ctx, options, emit)
         return show_pr(az, ctx, options.number, options, emit)
     raise CliError(f"az-gh: unsupported command: {options.command}")
 
 
 def main(argv: list[str] | None = None) -> int:
+    import os
     import sys
 
     args = list(sys.argv[1:] if argv is None else argv)
+    if os.environ.get("AZ_GH_PASSTHROUGH"):
+        from .recording import Recorder
+
+        return Recorder(args).run(lambda emit: run_official_github(args, emit))
     if args == ["--version"] or args == ["version"]:
         from .recording import Recorder
 

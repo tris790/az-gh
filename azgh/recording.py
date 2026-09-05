@@ -50,7 +50,7 @@ class JsonlLogger:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.touch(exist_ok=True)
-        self._file = self.path.open("a", encoding="utf-8", buffering=1)
+        self._file = self.path.open("a+", encoding="utf-8", buffering=1)
         self._lock_path = self.path.with_name(self.path.name + ".lock")
         self._lock_file = self._lock_path.open("a+b")
         if self._lock_path.stat().st_size == 0:

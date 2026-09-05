@@ -136,9 +136,37 @@ def resolve(repo_flag: str | None = None, cwd: Path | None = None) -> RepoContex
         organization = organization or remote_org
         project = project or remote_project
         repository = repository or remote_repository
-    if repo_flag:
+    if repo_flag and not _is_github_compat_repo(repo_flag, remote):
         flag_org, flag_project, flag_repository = parse_repo_flag(repo_flag)
         organization = flag_org or organization
         project = flag_project or project
         repository = flag_repository or repository
     return RepoContext(organization, project, repository)
+
+
+def _is_github_compat_repo(value: str, remote: str | None) -> bool:
+    """Identify owner/repository flags from callers using the gh interface.
+
+    A two-part value is ambiguous: gh means ``OWNER/REPOSITORY`` while this
+    adapter historically accepted it as Azure ``PROJECT/REPOSITORY``. When
+    the command is running from a GitHub checkout, the former interpretation
+    is the only useful one for Azure mode, so leave the Azure CLI's configured
+    organization/project/repository defaults in place. Explicit Azure URLs
+    and three-part Azure values remain unambiguous and are still honored.
+    """
+    if is_github_url(value) or value.strip().lower().startswith("github.com/"):
+        return True
+    if not remote or not is_github_url(remote):
+        return False
+    parts = [part for part in value.strip("/").split("/") if part]
+    if len(parts) != 2 or value.startswith(("http://", "https://")):
+        return False
+    owner = ""
+    if remote.startswith("git@github.com:"):
+        owner = remote.split(":", 1)[1].split("/", 1)[0]
+    else:
+        owner = next(
+            (part for part in urlparse(remote).path.strip("/").split("/") if part),
+            "",
+        )
+    return parts[0] == owner

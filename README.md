@@ -1,98 +1,53 @@
 # az-gh
+Replacement for `gh` cli that works on Azure Devops instead. Relies on `az` cli.
+To launch an app on linux the USER can use PATH="/home/nsa/repo/python/az-gh:$PATH" app
 
-`az-gh` provides the small `gh` command surface used by the current tooling,
-but retrieves pull requests and identity information from Azure DevOps through
-the Azure CLI (`az`). The executable keeps the name `gh`, so an existing tool
-that runs `gh pr list` or `gh pr diff` does not need a provider-specific change.
-
-## Supported commands
-
-```text
-gh --version
-gh auth status [--active] [--hostname HOST]
-gh api user [--hostname HOST] [--jq EXPRESSION]
-gh api graphql -f query=... -f searchQuery=... -F first=N [-f after=...]
-gh pr list [--head BRANCH] [--base BRANCH] [--author USER|@me]
-           [--state open|closed|all|merged] [--json FIELDS]
-           [--jq EXPRESSION] [--limit N] [--repo PROJECT/REPOSITORY|AZURE_URL]
-gh pr diff NUMBER [--repo PROJECT/REPOSITORY|AZURE_URL]
-gh pr view NUMBER [--json FIELDS] [--repo PROJECT/REPOSITORY|AZURE_URL]
-```
-
-The recorded `gh pr list --json number,url,state,headRefName` shape is
-preserved. Azure fields are translated as follows: `pullRequestId` becomes
-`number`, Azure `active/completed/abandoned` becomes `OPEN/MERGED/CLOSED`,
-Azure source and target refs lose their `refs/heads/` prefix, and the Azure
-pull-request web link becomes `url`.
-
-`pr diff` uses the Azure DevOps Git diff and item APIs via `az devops invoke`
-and emits a standard unified diff on stdout. This keeps the output consumable
-by tools that already parse `gh pr diff`.
-
-## Setup
-
-Install Azure CLI and its DevOps extension, then authenticate as usual:
+To bypass the Azure DevOps shim and run the real GitHub CLI at `/usr/bin/gh`,
+set `AZ_GH_PASSTHROUGH`:
 
 ```sh
-az extension add --name azure-devops
-az login
-az devops configure --defaults organization=https://dev.azure.com/ORG project=PROJECT
+AZ_GH_PASSTHROUGH=1 gh pr list
 ```
 
-The CLI resolves context in this order:
+All arguments, input, output, and the exit status are passed through to the
+official CLI.
 
-1. `--repo` (`PROJECT/REPOSITORY`, `ORGANIZATION/PROJECT/REPOSITORY`, or an
-   Azure DevOps organization, project, or repository URL)
-2. `AZ_GH_AZDO_*` / `AZDO_*` environment variables
-3. the current Git `origin` Azure DevOps remote
-4. Azure CLI configured defaults
+## Inspecting command recordings
 
-Useful explicit variables are `AZDO_ORG_URL`, `AZDO_PROJECT`,
-`AZDO_REPOSITORY`, and `AZDO_USER`. `AZ_GH_AZ` can point to a non-default
-Azure CLI executable for testing.
-
-Both Azure DevOps URL forms are accepted. For example, this project can be
-selected directly with:
+The JSONL recordings can be inspected without manually decoding base64 output:
 
 ```sh
-gh pr list --repo https://tris790.visualstudio.com/ClaudeOps
+python tools/parse_jsonl.py official_commands.jsonl --summary
+python tools/parse_jsonl.py az-gh-commands.jsonl --shapes
+python tools/parse_jsonl.py az-gh-commands.jsonl --json-output 2
 ```
 
-The equivalent modern URL is
-`https://dev.azure.com/tris790/ClaudeOps`.
+The shape view omits values while retaining object fields and JSON value types,
+which is useful when comparing GitHub and Azure responses for different PRs.
 
-On Linux/macOS, put this directory before other `gh` installations on `PATH`.
-On Windows, use the included `gh.cmd`, or install the package:
+## Replaying the official command contract
 
-```sh
-python -m pip install .
-```
+The compatibility suite replays every `argv` in `official_commands.jsonl` in
+order. It compares command order, output streams, exit codes, and
+value-independent output shapes; mismatches include the JSON path where a
+field is missing, unexpected, or has a different type.
 
-The package installs a cross-platform `gh` console script.
+Repository contents are allowed to differ between the GitHub recording and
+Azure replay: empty versus populated connections, nullable values, GraphQL
+error envelopes, and success versus not-found outcomes are treated as
+data-dependent. Stable field presence and concrete value types are still
+checked.
 
-The launcher supports both providers. Commands run from a GitHub checkout,
-with a GitHub `--hostname`, or against a GitHub URL are forwarded to the
-installed GitHub CLI. Azure DevOps commands use `az`; setting `AZ_GH_AZ`
-explicitly forces Azure behavior, which is also useful for tests.
-
-`gh api graphql` supports the pull-request search query shape used by common
-GitHub integrations and translates it to Azure DevOps pull requests. It
-supports `query`, `searchQuery`, `first`, and an empty or `null` `after` field.
-
-## Command recording
-
-Every invocation produces `start`, zero or more `output`, and `result` records
-in `commands.jsonl` by default. Set `AZ_GH_LOG_FILE` to choose another path.
-Output chunks are base64 encoded in the same schema as the original wrapper,
-with stdout/stderr identified separately and sequence numbers preserving event
-order. Logs are created with mode `0600`; a small `.lock` sidecar enables safe
-append locking on both POSIX and Windows. Logging is best effort and never
-prevents the CLI from running.
-
-## Development
-
-Run the standard-library test suite with:
+Run the deterministic suite with:
 
 ```sh
 python -m unittest discover -s tests -v
+python tools/replay_compat.py official_commands.jsonl
 ```
+
+The replay command uses the checked-in Azure fixture by default. To exercise a
+live Azure CLI instead, provide `--az az` and the Azure context flags, for
+example `--org https://dev.azure.com/ORG --project PROJECT --repository REPO`.
+
+For a focused recording containing only some GraphQL commands, compare by
+normalized query structure with `--actual capture.jsonl --partial`.
