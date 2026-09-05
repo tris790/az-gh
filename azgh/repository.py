@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import os
 from pathlib import Path
 import re
@@ -15,6 +16,28 @@ def _first_env(*names: str) -> str | None:
         if value:
             return value
     return None
+
+
+def _azure_cli_defaults() -> dict[str, str]:
+    """Read non-secret Azure DevOps defaults from the Azure CLI config."""
+    config_dir = os.environ.get("AZURE_CONFIG_DIR")
+    base = Path(config_dir) if config_dir else Path.home() / ".azure"
+    # The azure-devops extension keeps its defaults in a separate config
+    # directory.  Retain the root-level fallback for older/custom layouts.
+    paths = [base / "azuredevops" / "config", base / "config"]
+    parser = configparser.RawConfigParser()
+    try:
+        if not any(parser.read(path, encoding="utf-8") for path in paths):
+            return {}
+    except (OSError, configparser.Error):
+        return {}
+    if not parser.has_section("defaults"):
+        return {}
+    return {
+        key: value.strip()
+        for key, value in parser.items("defaults")
+        if value.strip()
+    }
 
 
 def normalize_org(value: str | None) -> str | None:
@@ -138,17 +161,34 @@ def git_remote(cwd: Path | None = None) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def resolve(repo_flag: str | None = None, cwd: Path | None = None) -> RepoContext:
-    organization = _first_env("AZ_GH_AZDO_ORG", "AZDO_ORG_URL", "AZURE_DEVOPS_ORG_URL")
-    project = _first_env("AZ_GH_AZDO_PROJECT", "AZDO_PROJECT", "AZURE_DEVOPS_PROJECT")
-    repository = _first_env("AZ_GH_AZDO_REPOSITORY", "AZDO_REPOSITORY", "AZURE_DEVOPS_REPOSITORY")
+def resolve(
+    repo_flag: str | None = None,
+    cwd: Path | None = None,
+    *,
+    use_azure_defaults: bool = False,
+) -> RepoContext:
+    env_organization = _first_env("AZ_GH_AZDO_ORG", "AZDO_ORG_URL", "AZURE_DEVOPS_ORG_URL")
+    env_project = _first_env("AZ_GH_AZDO_PROJECT", "AZDO_PROJECT", "AZURE_DEVOPS_PROJECT")
+    env_repository = _first_env("AZ_GH_AZDO_REPOSITORY", "AZDO_REPOSITORY", "AZURE_DEVOPS_REPOSITORY")
+    defaults = _azure_cli_defaults() if use_azure_defaults else {}
+    organization = env_organization or defaults.get("organization")
+    project = env_project or defaults.get("project")
+    repository = env_repository or defaults.get("repository")
 
     if organization and organization.startswith(("http://", "https://")):
-        env_org, env_project, env_repository = parse_remote(organization)
-        if env_org:
-            organization = env_org
-            project = project or env_project
-            repository = repository or env_repository
+        parsed_org, parsed_project, parsed_repository = parse_remote(organization)
+        if parsed_org:
+            organization = parsed_org
+            # A project/repository embedded in an explicit environment URL
+            # is more specific than values loaded from Azure CLI defaults.
+            if env_organization and parsed_project:
+                project = parsed_project
+            else:
+                project = project or parsed_project
+            if env_organization and parsed_repository:
+                repository = parsed_repository
+            else:
+                repository = repository or parsed_repository
 
     remote = git_remote(cwd)
     if remote:

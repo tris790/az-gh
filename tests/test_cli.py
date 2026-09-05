@@ -73,6 +73,20 @@ class AzGhTests(unittest.TestCase):
         self.assertEqual(context.organization, "https://tris790.visualstudio.com")
         self.assertEqual(context.project, "ClaudeOps")
 
+    def test_azure_cli_defaults_normalize_modern_organization_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config_dir = Path(temporary)
+            (config_dir / "azuredevops").mkdir()
+            (config_dir / "azuredevops" / "config").write_text(
+                "[defaults]\n"
+                "organization = https://dev.azure.com/acme/video%20cloud\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"AZURE_CONFIG_DIR": str(config_dir)}, clear=False):
+                context = resolve(cwd=Path("/does/not/exist"), use_azure_defaults=True)
+        self.assertEqual(context.organization, "https://dev.azure.com/acme")
+        self.assertEqual(context.project, "video cloud")
+
     def test_github_owner_repo_flag_uses_azure_defaults_from_github_checkout(self) -> None:
         context = resolve("tris790/az-gh", cwd=ROOT)
         self.assertIsNone(context.organization)
@@ -334,7 +348,13 @@ else:
         env = os.environ.copy()
         env.pop("AZ_GH_PASSTHROUGH", None)
         env.pop("AZ_GH_PROVIDER", None)
-        env.update({"AZ_GH_AZ": str(fake), "AZ_GH_LOG_FILE": str(log)})
+        # Keep subprocess tests independent from the developer's real
+        # ~/.azure/azuredevops/config defaults.
+        env.update({
+            "AZ_GH_AZ": str(fake),
+            "AZ_GH_LOG_FILE": str(log),
+            "AZURE_CONFIG_DIR": str(log.parent / "empty-azure-config"),
+        })
         return subprocess.run([str(CLI), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False)
 
     def read_records(self, log: Path) -> list[dict[str, object]]:

@@ -317,7 +317,7 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
         if options.endpoint.strip("/") == "graphql":
             return graphql_api(
                 az,
-                resolve(),
+                resolve(use_azure_defaults=True),
                 options.raw_fields,
                 options.typed_fields,
                 emit,
@@ -340,7 +340,7 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
         user = configured_username(data)
         github_host = (options.hostname or "").lower() == "github.com"
         login = user.split("@", 1)[0] if github_host and "@" in user else user
-        identity = profile(az, user, resolve().organization)
+        identity = profile(az, user, resolve(use_azure_defaults=True).organization)
         identity_user = identity.get("user") if isinstance(identity.get("user"), dict) else {}
         identity_id = str(identity.get("id") or user or "azure-user")
         # GitHub's user endpoint exposes a numeric id. Azure identities use a
@@ -416,7 +416,7 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
     if options.command == "pr":
         if options.pr_command not in {"list", "diff", "comment", "view", "show"}:
             raise CliError("gh pr: a subcommand is required")
-        ctx = resolve(getattr(options, "repo", None))
+        ctx = resolve(getattr(options, "repo", None), use_azure_defaults=True)
         if options.pr_command == "list":
             return list_prs(az, ctx, options, emit)
         if options.pr_command == "diff":
