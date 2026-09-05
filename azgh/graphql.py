@@ -1071,7 +1071,7 @@ def _single_pr_response(
     }
     if include_viewer:
         viewer_data = viewer_future.result() if viewer_future is not None else {}
-        result["viewer"] = {"login": configured_username(viewer_data)}
+        result["viewer"] = {"login": _viewer_login(viewer_data, github_url)}
     return result
 
 
@@ -1080,13 +1080,20 @@ def _is_not_found_error(error: CliError) -> bool:
     return "tf401180" in message or "not found" in message or "could not resolve" in message
 
 
+def _viewer_login(viewer_data: dict[str, Any], github_url: bool) -> str:
+    login = configured_username(viewer_data)
+    return login.split("@", 1)[0] if github_url and "@" in login else login
+
+
 def _graphql_error_message(error: CliError) -> str:
     message = str(error).strip()
     message = re.sub(r"^ERROR:\s*TF\d+:\s*", "", message, flags=re.IGNORECASE)
     return message.removeprefix("az-gh: ")
 
 
-def _graphql_not_found_response(az: AzCli, query: str, error: CliError) -> dict[str, Any]:
+def _graphql_not_found_response(
+    az: AzCli, query: str, error: CliError, *, github_url: bool = False
+) -> dict[str, Any]:
     try:
         viewer_data = account(az)
     except CliError:
@@ -1098,7 +1105,7 @@ def _graphql_not_found_response(az: AzCli, query: str, error: CliError) -> dict[
         if not _conditions_match(conditions, None):
             continue
         if field_name == "viewer":
-            data[output_name] = {"login": configured_username(viewer_data)}
+            data[output_name] = {"login": _viewer_login(viewer_data, github_url)}
         elif field_name == "repository":
             data[output_name] = None
             errors.append({
@@ -1138,7 +1145,12 @@ def graphql_api(
         except CliError as error:
             if not _is_not_found_error(error):
                 raise
-            result = _graphql_not_found_response(az, query, error)
+            result = _graphql_not_found_response(
+                az,
+                query,
+                error,
+                github_url=(hostname or "").lower() == "github.com",
+            )
             emit(
                 "stdout",
                 (json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"),

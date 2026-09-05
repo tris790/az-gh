@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 from typing import Any, Callable
+from urllib.parse import quote
 
 from . import __version__
 from .azcli import AzCli
@@ -327,7 +328,9 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
             raise CliError("az-gh: only the gh api user and graphql endpoints are supported")
         data = account(az)
         user = configured_username(data)
-        identity = profile(az, user)
+        github_host = (options.hostname or "").lower() == "github.com"
+        login = user.split("@", 1)[0] if github_host and "@" in user else user
+        identity = profile(az, user, resolve().organization)
         identity_user = identity.get("user") if isinstance(identity.get("user"), dict) else {}
         identity_id = str(identity.get("id") or user or "azure-user")
         # GitHub's user endpoint exposes a numeric id. Azure identities use a
@@ -341,23 +344,36 @@ def dispatch(argv: list[str], emit: Callable[[str, bytes], None]) -> int:
         numeric_id = int.from_bytes(hashlib.sha256(identity_id.encode("utf-8")).digest()[:8], "big") % (2**53 - 1)
         user_url = str(identity_user.get("url") or "https://dev.azure.com/")
         api_root = user_url.split("/_apis/", 1)[0].rstrip("/")
+        azure_api_root = api_root
+        if github_host:
+            # The caller uses this endpoint as a GitHub account probe. Azure
+            # identity URLs are valid for Azure CLI users but are not
+            # parseable as GitHub source URLs, especially with modern
+            # dev.azure.com identity hosts.
+            api_root = "https://api.github.com"
+            user_url = f"{api_root}/users/{quote(login, safe='')}"
+            html_url = f"https://github.com/{quote(login, safe='')}"
+            user_path = f"/users/{quote(login, safe='')}"
+        else:
+            html_url = user_url
+            user_path = f"/users/{user}"
         result: Any = {
-            "login": user,
+            "login": login,
             "id": numeric_id,
             "node_id": identity_id,
-            "avatar_url": str(identity_user.get("imageUrl") or f"{api_root}/_apis/Graph/Users/{identity_id}/image"),
+            "avatar_url": str(identity_user.get("imageUrl") or f"{azure_api_root}/_apis/Graph/Users/{identity_id}/image"),
             "gravatar_id": "",
             "url": user_url,
-            "html_url": user_url,
-            "followers_url": f"{api_root}/users/{user}/followers",
-            "following_url": f"{api_root}/users/{user}/following{{/other_user}}",
-            "gists_url": f"{api_root}/gists{{/gist_id}}",
-            "starred_url": f"{api_root}/starred{{/owner}}{{/repo}}",
-            "subscriptions_url": f"{api_root}/subscriptions",
-            "organizations_url": f"{api_root}/orgs",
-            "repos_url": f"{api_root}/repos",
-            "events_url": f"{api_root}/events{{/privacy}}",
-            "received_events_url": f"{api_root}/received_events",
+            "html_url": html_url,
+            "followers_url": f"{api_root}{user_path}/followers",
+            "following_url": f"{api_root}{user_path}/following{{/other_user}}",
+            "gists_url": f"{api_root}{user_path}/gists{{/gist_id}}" if github_host else f"{api_root}/gists{{/gist_id}}",
+            "starred_url": f"{api_root}{user_path}/starred{{/owner}}{{/repo}}" if github_host else f"{api_root}/starred{{/owner}}{{/repo}}",
+            "subscriptions_url": f"{api_root}{user_path}/subscriptions" if github_host else f"{api_root}/subscriptions",
+            "organizations_url": f"{api_root}{user_path}/orgs" if github_host else f"{api_root}/orgs",
+            "repos_url": f"{api_root}{user_path}/repos" if github_host else f"{api_root}/repos",
+            "events_url": f"{api_root}{user_path}/events{{/privacy}}" if github_host else f"{api_root}/events{{/privacy}}",
+            "received_events_url": f"{api_root}{user_path}/received_events" if github_host else f"{api_root}/received_events",
             "type": "User",
             "user_view_type": "public",
             "site_admin": False,

@@ -8,7 +8,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from azgh.azcli import AzCli
 from azgh.errors import CliError
@@ -773,6 +773,7 @@ else:
                 json.loads(completed.stdout)["data"]["p0"]["pullRequest"]["url"],
                 "https://github.com/acme/widget/pull/4",
             )
+            self.assertEqual(json.loads(completed.stdout)["data"]["viewer"]["login"], "alice")
 
     def test_graphql_github_host_projects_nested_resource_urls(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -920,6 +921,35 @@ else:
                 "hireable", "bio", "twitter_username", "notification_email", "public_repos",
                 "public_gists", "followers", "following", "created_at", "updated_at",
             })
+
+    def test_api_user_uses_github_urls_for_github_compatibility_host(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            completed = self.run_cli(
+                self.make_fake_az(directory),
+                directory / "commands.jsonl",
+                "api", "user", "--hostname", "github.com",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result = json.loads(completed.stdout)
+            self.assertEqual(result["login"], "alice")
+            self.assertEqual(result["url"], "https://api.github.com/users/alice")
+            self.assertEqual(result["html_url"], "https://github.com/alice")
+            self.assertEqual(result["repos_url"], "https://api.github.com/users/alice/repos")
+
+    def test_api_user_does_not_leak_optional_identity_lookup_errors(self) -> None:
+        from azgh.identity import profile
+
+        az = Mock()
+        az.json.side_effect = CliError("bad organization")
+        self.assertEqual(profile(az, "alice@example.com", "https://dev.azure.com/acme"), {})
+        az.json.assert_called_once_with(
+            [
+                "devops", "user", "show", "--user", "alice@example.com",
+                "--organization", "https://dev.azure.com/acme",
+            ],
+            emit_stderr=False,
+        )
 
     def test_github_repository_commands_are_delegated(self) -> None:
         from azgh.github import should_delegate
