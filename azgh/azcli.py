@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from subprocess import CompletedProcess
 import subprocess
 import tempfile
@@ -18,7 +19,11 @@ class AzCli:
 
     def __init__(self, emit: Callable[[str, bytes], None]) -> None:
         self.emit = emit
-        self.executable = os.environ.get("AZ_GH_AZ", "az")
+        configured = os.environ.get("AZ_GH_AZ")
+        # On Windows the Azure CLI is often exposed as ``az.cmd`` rather than
+        # an executable named ``az``.  Resolve both forms before falling back
+        # to ``az`` so subprocess creation does not fail with WinError 2.
+        self.executable = configured or shutil.which("az") or shutil.which("az.cmd") or "az"
 
     def run(self, args: list[str]) -> CompletedProcess[bytes]:
         try:

@@ -44,7 +44,16 @@ class RepoContext:
 
 
 def parse_repo_flag(value: str) -> tuple[str | None, str | None, str | None]:
-    if value.startswith("http://") or value.startswith("https://"):
+    value = value.strip()
+    first_path_part = value.split("/", 1)[0].lower()
+    is_azure_url = (
+        value.startswith("http://")
+        or value.startswith("https://")
+        or value.startswith("//")
+        or first_path_part == "dev.azure.com"
+        or first_path_part.endswith(".visualstudio.com")
+    )
+    if is_azure_url:
         parsed = parse_remote(value)
         if parsed == (None, None, None):
             raise CliError(
@@ -65,6 +74,17 @@ def parse_remote(remote: str) -> tuple[str | None, str | None, str | None]:
     ssh = re.match(r"^git@ssh\.dev\.azure\.com:v3/([^/]+)/([^/]+)/(.+?)/?$", remote)
     if ssh:
         return ssh.group(1), ssh.group(2), ssh.group(3)
+
+    # ``gh --repo`` accepts host/path values without a scheme, and Azure
+    # links are commonly copied in that form (for example,
+    # ``dev.azure.com/org/project``).  Let urlparse see the host instead of
+    # treating the whole value as a path.
+    if remote.startswith("//"):
+        remote = "https:" + remote
+    elif not remote.startswith(("http://", "https://")):
+        first_path_part = remote.split("/", 1)[0].lower()
+        if first_path_part == "dev.azure.com" or first_path_part.endswith(".visualstudio.com"):
+            remote = "https://" + remote
 
     parsed = urlparse(remote)
     host = parsed.hostname or ""

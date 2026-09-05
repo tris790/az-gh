@@ -2,6 +2,36 @@
 Replacement for `gh` cli that works on Azure Devops instead. Relies on `az` cli.
 To launch an app on linux the USER can use PATH="/home/nsa/repo/python/az-gh:$PATH" app
 
+## Setup
+
+Install the Azure DevOps extension, authenticate, and configure the
+organization and project as separate defaults:
+
+```sh
+az extension add --name azure-devops
+az login
+az devops configure --defaults organization=https://dev.azure.com/ORG project=PROJECT
+python -m pip install /path/to/az-gh
+```
+
+The `organization` value must end at the organization name. For a URL such as
+`https://dev.azure.com/ORG/PROJECT`, use
+`organization=https://dev.azure.com/ORG project=PROJECT`.
+
+Verify that the shim, rather than the official GitHub CLI, is being invoked:
+
+```sh
+gh --version
+```
+
+The output should contain `Azure DevOps`. If it does not, put the installed
+shim first on `PATH` (or use the included `gh.cmd` on Windows).
+
+If `gh pr list` reports Windows `WinError 2`, verify that Azure CLI itself is
+available in the same terminal with `az --version`. On Windows, restart the
+terminal after installing Azure CLI so its `az.cmd` directory is included in
+`PATH`.
+
 To bypass the Azure DevOps shim and run the real GitHub CLI at `/usr/bin/gh`,
 set `AZ_GH_PASSTHROUGH`:
 
@@ -51,3 +81,8 @@ example `--org https://dev.azure.com/ORG --project PROJECT --repository REPO`.
 
 For a focused recording containing only some GraphQL commands, compare by
 normalized query structure with `--actual capture.jsonl --partial`.
+
+Azure repository URLs may be passed with or without the `https://` prefix, for
+example `gh pr list --repo dev.azure.com/ORG/PROJECT`. The shim also discovers
+the organization and project from the current Git `origin` remote when the
+remote uses a full Azure repository URL.

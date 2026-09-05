@@ -36,6 +36,14 @@ class AzGhTests(unittest.TestCase):
             ("https://dev.azure.com/tris790", "ClaudeOps", None),
         )
         self.assertEqual(
+            parse_repo_flag("dev.azure.com/tris790/ClaudeOps"),
+            ("https://dev.azure.com/tris790", "ClaudeOps", None),
+        )
+        self.assertEqual(
+            parse_repo_flag("dev.azure.com/tris790/ClaudeOps/_git/widget"),
+            ("https://dev.azure.com/tris790", "ClaudeOps", "widget"),
+        )
+        self.assertEqual(
             parse_repo_flag("https://tris790.visualstudio.com/ClaudeOps/_git/widget"),
             ("https://tris790.visualstudio.com", "ClaudeOps", "widget"),
         )
@@ -75,6 +83,13 @@ class AzGhTests(unittest.TestCase):
             with self.assertRaisesRegex(CliError, "Azure CLI request timed out") as raised:
                 AzCli(lambda _stream, _data: None).run(["account", "show"])
         self.assertEqual(raised.exception.exit_code, 124)
+
+    def test_azure_cli_resolves_az_cmd_when_az_is_not_found(self) -> None:
+        with patch("azgh.azcli.shutil.which", side_effect=lambda name: "C:/Azure/az.cmd" if name == "az.cmd" else None):
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("AZ_GH_AZ", None)
+                az = AzCli(lambda _stream, _data: None)
+        self.assertEqual(az.executable, "C:/Azure/az.cmd")
 
     def make_fake_az(self, directory: Path) -> Path:
         fake = directory / ("az.cmd" if os.name == "nt" else "az")
